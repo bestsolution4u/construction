@@ -1,0 +1,524 @@
+import React, {Component} from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  Image,
+  ImageBackground,
+  ScrollView,
+  Dimensions,
+  Platform,
+  TouchableWithoutFeedback,
+} from 'react-native';
+import {isEmpty} from 'lodash';
+import {Button} from 'native-base';
+import {verticalScale, scale} from '../../Utils/scaling';
+import style from './style';
+import CardContainer from '../../Components/Common/CardContainer';
+import AssignedToContainer from '../../Components/Common/AssignedToContainer';
+import ViewPager from '@react-native-community/viewpager';
+import MapView, {Circle} from 'react-native-maps';
+import Modal from 'react-native-modal';
+import Polyline from '@mapbox/polyline';
+import Geolocation from '@react-native-community/geolocation';
+import axios from 'axios';
+import {taskData} from './taskDetailsData';
+//Redux
+import {connect} from 'react-redux';
+import {bindActionCreators} from 'redux';
+import moment from 'moment';
+
+import {successMessage, errorMessage} from '../../Utils/alerts';
+
+let {height, width} = Dimensions.get('window');
+
+let ASPECT_RATIO = width / height;
+let LATITUDE_DELTA = 0.05; //zoom of map
+let LONGITUDE_DELTA = LATITUDE_DELTA * ASPECT_RATIO;
+
+let polyColors = ['#679BF0', '#E0B03B', '#BA2430'];
+
+import * as tasksActions from '../../redux/actions/tasksActions';
+import {getCompanyTaskDetails} from '../../redux/selectors/index';
+
+class AdminTaskDetails extends Component {
+  constructor(props) {
+    super(props);
+    this.state = {
+      currentPage: 0,
+      showDelete: true,
+      yPostion: 0,
+      deleteModalVisible: false,
+      region: {},
+      coords: [],
+      apiDirections: false,
+      polylineColors: polyColors,
+      responseData: {},
+    };
+  }
+
+  componentDidMount = async () => {
+    const {taskDetails} = taskData;
+    this.props.tasksActions.fetchCompanyTaskDetails({
+      params: this.props.navigation.state.params.id,
+      onFail: error => {
+        errorMessage({message: error.errorMessage});
+      },
+    });
+    this.props.navigation.setParams({
+      taskDetailsDelete: this.onShowDeleteModal,
+    });
+
+    try {
+      Geolocation.getCurrentPosition(
+        position => {
+          const region = {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+            latitudeDelta: LATITUDE_DELTA,
+            longitudeDelta: LONGITUDE_DELTA,
+          };
+          this.setState({region}, () => {
+            let origin = `${this.state.region.latitude}, ${this.state.region.longitude}`;
+            this.props.navigation.setParams({userLocation: this.state.region});
+
+            axios
+              .get(
+                `https://maps.googleapis.com/maps/api/directions/json?origin=${origin}&destination=${taskDetails.location}&alternatives=true&key=AIzaSyAgaJy8mY7URd4jX_rtr_Ab0m0fvBLeuxk`,
+              )
+              .then(response => {
+                this.props.navigation.setParams({directionResponse: response});
+                this.setState({responseData: response});
+                let distance = parseInt(
+                  response.data.routes[0].legs[0].distance.text,
+                );
+                LATITUDE_DELTA = distance / 90;
+
+                let points = Polyline.decode(
+                  response.data.routes[0].overview_polyline.points,
+                );
+                let coords = points.map(point => {
+                  return {
+                    latitude: point[0],
+                    longitude: point[1],
+                  };
+                });
+
+                this.setState({coords}, () => {
+                  this.setState({apiDirections: true});
+                });
+                let length = coords.length;
+                let polylineColors = [];
+                if (length >= 1) {
+                  if (length >= 3) {
+                    let j = 0;
+                    for (let i = 2; i < length; i++) {
+                      if (j > 2) {
+                        j = 0;
+                      }
+                      polylineColors.push(polyColors[j]);
+                      j++;
+                    }
+                  } else {
+                    polylineColors.shift();
+                  }
+                } else {
+                  polylineColors = [polyColors[0]];
+                }
+                this.setState({polylineColors});
+              })
+              .then(() => {
+                let region = {
+                  latitude: this.state.region.latitude,
+                  longitude: this.state.region.longitude,
+                  latitudeDelta: LATITUDE_DELTA,
+                  longitudeDelta: LONGITUDE_DELTA,
+                };
+                this.setRegion(region);
+              })
+              .catch(error => {
+                console.log(error);
+              });
+          });
+        },
+        error => {
+          console.log('Error getting the current postion');
+        },
+      );
+    } catch (e) {
+      throw e;
+    }
+  };
+
+  setRegion = region => {
+    const {coords} = this.state;
+    const coordsLength = coords.length;
+
+    let latitude =
+      coordsLength % 2 === 0
+        ? coords[coordsLength / 2].latitude
+        : coords[(coordsLength + 1) / 2].latitude;
+    let longitude =
+      coordsLength % 2 === 0
+        ? coords[coordsLength / 2].longitude
+        : coords[(coordsLength + 1) / 2].longitude;
+
+    setTimeout(
+      () =>
+        this.map.animateToRegion({
+          latitude,
+          longitude,
+          latitudeDelta: region.latitudeDelta,
+          longitudeDelta: region.longitudeDelta,
+        }),
+      10,
+    );
+  };
+
+  onHandleMapPress = () => {
+    // navigate to full size map
+
+    this.props.navigation.navigate('FullMapDirectionAdmin', {
+      userLocation: this.state.region,
+      response: this.state.responseData,
+    });
+  };
+  onShowDeleteModal = () => {
+    this.setState({deleteModalVisible: true});
+  };
+  onHandlePressDelete = () => {
+    // handle delete task press
+    this.setState({deleteModalVisible: false});
+    const taskId = this.props.navigation.state.params.id;
+    this.props.tasksActions.companyTaskDelete({
+      id: taskId,
+      onSuccess: () => {
+        successMessage({message: 'Deleted task successfully.'});
+        this.props.navigation.navigate('AdminAllTasks');
+      },
+      onFail: error => {
+        errorMessage({message: error.errorMessage});
+      },
+    });
+  };
+  onHandleChangeImage = type => {
+    const {currentPage} = this.state;
+    const {images} = taskData;
+
+    if (type === 'left') {
+      this.setState(
+        {currentPage: currentPage <= 0 ? currentPage : currentPage - 1},
+        () => {
+          this.page.setPage(this.state.currentPage);
+        },
+      );
+      return;
+    }
+    if (type === 'right') {
+      this.setState(
+        {
+          currentPage:
+            currentPage >= images.length - 1 ? currentPage : currentPage + 1,
+        },
+        () => {
+          this.page.setPage(this.state.currentPage);
+        },
+      );
+      return;
+    }
+  };
+
+  onPressEditTask = () => {
+    this.props.navigation.navigate('AdminCreateNewTask', {isEdit: true});
+  };
+
+  _renderTaskImages = () => {
+    let images = [];
+    const isImageFromProps =
+      !isEmpty(this.props.taskDetails) &&
+      !isEmpty(this.props.taskDetails.taskData.images_urls);
+    if (isImageFromProps) images = this.props.taskDetails.taskData.images_urls;
+    else images = taskData.images;
+    if (images.length < 1) {
+      return (
+        <View
+          style={[style.header_image_background, {backgroundColor: '#A2A2A2'}]}
+        />
+      );
+    }
+    return images.map((item, index) => (
+      <TouchableWithoutFeedback
+        key={index}
+        style={{flex: 1}}
+        onPress={() => {
+          this.props.navigation.navigate('BigImageScreenAdmin', {
+            source: item.url,
+          });
+        }}>
+        <ImageBackground
+          source={isImageFromProps ? {uri: item.url} : item.url}
+          style={[style.header_image_background, {flexDirection: 'row'}]}>
+          <View
+            style={{
+              flex: 1,
+              justifyContent: 'center',
+              alignItems: 'flex-start',
+            }}>
+            <TouchableOpacity
+              onPress={() => this.onHandleChangeImage('left')}
+              style={style.arrow_change_image}>
+              <Image
+                style={style.np_left_right_image}
+                source={require('../../assets/images/np_arrow_left.png')}
+              />
+            </TouchableOpacity>
+          </View>
+          <View
+            style={{flex: 1, justifyContent: 'center', alignItems: 'flex-end'}}>
+            <TouchableOpacity
+              onPress={() => this.onHandleChangeImage('right')}
+              style={style.arrow_change_image}>
+              <Image
+                style={style.np_left_right_image}
+                source={require('../../assets/images/np_arrow_right.png')}
+              />
+            </TouchableOpacity>
+          </View>
+        </ImageBackground>
+      </TouchableWithoutFeedback>
+    ));
+  };
+  render() {
+    const taskDetails = this.props.taskDetails.taskData;
+    const employeeDetails = this.props.taskDetails.employeeData;
+    return (
+      <View style={style.container}>
+        <ScrollView>
+          <ViewPager
+            onPageSelected={e => {
+              this.setState({currentPage: e.nativeEvent.position});
+            }}
+            ref={ref => (this.page = ref)}
+            initialPage={this.state.currentPage}
+            showPageIndicator={true}
+            style={style.header_image_background}>
+            {this._renderTaskImages()}
+          </ViewPager>
+          <View style={{flex: 1}}>
+            <View style={style.details_view}>
+              <View style={style.details_title_view}>
+                <Text
+                  style={{
+                    color: '#000000',
+                    fontWeight: 'bold',
+                    fontSize: verticalScale(18),
+                    marginBottom: verticalScale(5),
+                  }}>
+                  {taskDetails?.title}
+                </Text>
+                <Text
+                  style={{
+                    color: '#000000',
+                    fontSize: verticalScale(16),
+                    textAlign: 'left',
+                  }}>
+                  {taskDetails?.description}
+                </Text>
+              </View>
+              <View style={style.row_details}>
+                <View style={style.row_details_key_view}>
+                  <Text style={style.row_details_key}>Client Name</Text>
+                </View>
+                <View style={style.row_details_value_view}>
+                  <Text style={style.row_details_value}>
+                    {taskDetails?.client_info.name}
+                  </Text>
+                </View>
+              </View>
+              <View style={style.row_details}>
+                <View style={style.row_details_key_view}>
+                  <Text style={style.row_details_key}>Phone Number</Text>
+                </View>
+                <View style={style.row_details_value_view}>
+                  <Text style={style.row_details_value}>
+                    {taskDetails?.client_info.phone}
+                  </Text>
+                </View>
+              </View>
+              <View style={style.row_details}>
+                <View style={style.row_details_key_view}>
+                  <Text style={style.row_details_key}>{'Date & Time'}</Text>
+                </View>
+                <View
+                  style={[
+                    style.row_details_value_view,
+                    {
+                      flexDirection: 'row',
+                      justifyContent: 'flex-end',
+                      alignItems: 'center',
+                    },
+                  ]}>
+                  <Text style={[style.row_details_value, {right: scale(15)}]}>
+                    {moment(taskDetails?.date).format('MMM. DD, YYYY')}
+                  </Text>
+                  <Text style={[style.row_details_value, {textAlign: 'right'}]}>
+                    {moment(taskDetails?.time).format('h:mm a')}
+                  </Text>
+                </View>
+              </View>
+            </View>
+            <View style={{height: verticalScale(179), width: '100%'}}>
+              <MapView
+                showsTraffic={true}
+                showsBuildings={true}
+                onPress={this.onHandleMapPress}
+                showsMyLocationButton
+                style={{flex: 1}}
+                ref={ref => (this.map = ref)}
+                showsUserLocation={true}
+                scrollEnabled={false}
+                zoomControlEnabled={false}
+                zoomEnabled={false}
+                moveOnMarkerPress={false}
+                showsIndoorLevelPicker={true}
+                showsIndoors={true}
+                showsPointsOfInterest={true}
+                rotateEnabled={false}>
+                {Platform.OS === 'ios' ? (
+                  <MapView.Polyline
+                    coordinates={this.state.coords}
+                    strokeWidth={4}
+                    geodesic={true}
+                    tappable={true}
+                    strokeColors={this.state.polylineColors}
+                  />
+                ) : (
+                  <MapView.Polyline
+                    coordinates={this.state.coords}
+                    strokeWidth={4}
+                    strokeColor="#679BF0"
+                    geodesic={true}
+                    tappable={true}
+                  />
+                )}
+                {this.state.apiDirections ? (
+                  <Circle
+                    center={{
+                      latitude: this.state.coords[this.state.coords.length - 1]
+                        .latitude,
+                      longitude: this.state.coords[this.state.coords.length - 1]
+                        .longitude,
+                    }}
+                    radius={LATITUDE_DELTA * 3000}
+                    strokeWidth={2}
+                  />
+                ) : null}
+
+                {!!this.state.region.latitude && !!this.state.region.longitude && (
+                  <MapView.Marker
+                    coordinate={{
+                      latitude: this.state.region.latitude,
+                      longitude: this.state.region.longitude,
+                    }}
+                    title={'Your Location'}
+                  />
+                )}
+              </MapView>
+            </View>
+            <View
+              style={{
+                paddingHorizontal: scale(20),
+                paddingTop: verticalScale(10),
+                paddingBottom: verticalScale(30),
+                justifyContent: 'center',
+                alignItems: 'center',
+                height: 'auto',
+                width: '100%',
+              }}>
+              <View
+                style={{
+                  paddingVertical: verticalScale(5),
+                  width: '100%',
+                  alignItems: 'flex-start',
+                  justifyContent: 'center',
+                }}>
+                <Text style={{color: '#A2A2A2', fontSize: verticalScale(14)}}>
+                  Assigned To:
+                </Text>
+              </View>
+              <AssignedToContainer
+                styleContainer={{marginBottom: verticalScale(40)}}
+                source={{uri: employeeDetails?.avatar}}
+                email={employeeDetails?.email}
+                taskStatus={taskDetails?.status}
+              />
+              <Button
+                onPress={this.onPressEditTask}
+                style={{
+                  justifyContent: 'center',
+                  elevation: 0,
+                  alignItems: 'center',
+                  width: '100%',
+                  borderRadius: verticalScale(5),
+                  height: verticalScale(47),
+                }}>
+                <Text
+                  style={{
+                    color: '#FFFFFF',
+                    fontSize: verticalScale(16),
+                    fontWeight: 'bold',
+                  }}>
+                  Edit Task
+                </Text>
+              </Button>
+            </View>
+          </View>
+        </ScrollView>
+        <Modal
+          animationIn="fadeIn"
+          animationOut="fadeOut"
+          isVisible={this.state.deleteModalVisible}
+          onBackdropPress={() => {
+            this.setState({deleteModalVisible: false});
+          }}>
+          <CardContainer style={style.cardContainer}>
+            <View style={style.cardWrapper}>
+              <Text style={style.modal_title}>
+                Are you sure you want to delete?
+              </Text>
+              <View style={style.modal_view_content}>
+                <Text style={style.modal_content}>
+                  This action will permanently delete selected tasks.
+                </Text>
+              </View>
+              <Button
+                onPress={this.onHandlePressDelete}
+                style={style.modal_delete}>
+                <Text style={style.text_delete}>Delete</Text>
+              </Button>
+              <Button
+                onPress={() => this.setState({deleteModalVisible: false})}
+                style={style.modal_cancel}>
+                <Text style={style.text_cancel}>Cancel</Text>
+              </Button>
+            </View>
+          </CardContainer>
+        </Modal>
+      </View>
+    );
+  }
+}
+
+const mapStateToProps = state => {
+  return {
+    taskDetails: getCompanyTaskDetails(state),
+  };
+};
+
+const mapDispatchToProps = dispatch => {
+  return {
+    tasksActions: bindActionCreators(tasksActions, dispatch),
+  };
+};
+
+export default connect(mapStateToProps, mapDispatchToProps)(AdminTaskDetails);
